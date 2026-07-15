@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 venv/
 outputs/
+data/sleep_parsed_anonymised.xlsx
+models/*.joblib

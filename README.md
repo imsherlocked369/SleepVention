@@ -1,244 +1,300 @@
-# SleepVention
+# Sleep Efficiency Insight
 
-SleepVention is an AI-agent-based prototype for interpreting wearable sleep data with machine learning-powered pattern detection.
+This repository provides a non-diagnostic prototype that estimates sleep
+efficiency from one Oura-compatible sleep record. The deployed model design is
+an XGBoost regressor, and SHAP is used to explain individual model predictions.
 
-The system takes wearable sleep metrics such as sleep duration, sleep efficiency, wake after sleep onset (WASO), resting heart rate, HRV, and movement count, then generates a personalized, non-diagnostic sleep insight by identifying meaningful sleep patterns and severity levels.
-
-## Architecture Overview
-
-The system uses a **4-agent pipeline** where each agent has a specific responsibility:
-
+```text
+Raw Oura sleep data
+        |
+        v
+Data Quality Agent
+        |
+        v
+Feature Extraction Agent
+        |
+        v
+XGBoost Efficiency Prediction
+        |
+        v
+SHAP Model Explanation
+        |
+        v
+LLM or deterministic Report Generation
+        |
+        v
+Personalised, non-diagnostic report
 ```
-Raw Sleep Data
-      ↓
-[Agent 1: Data Quality] → Validates completeness and realism
-      ↓
-[Agent 2: Feature Extraction] → Extracts features and compares with baseline
-      ↓
-[Agent 3: Pattern Detection] → Identifies and labels sleep patterns (ML-enhanced)
-      ↓
-[Agent 4: Report Generation] → Converts patterns into user-friendly narrative
-      ↓
-Personalized Sleep Insight
+
+The repository does not contain a real trained model until the training command
+is run manually.
+
+## Method
+
+Sleep efficiency can normally be calculated directly from total sleep time and
+time in bed. To avoid target leakage, the direct components of that formula were
+excluded from the model. XGBoost therefore estimates efficiency from independent
+physiological, temporal and sleep-stage-composition features.
+
+The raw `total`, `rem`, and `deep` values are accepted temporarily only to
+calculate REM- and deep-sleep percentages. They are never passed directly into
+the model. Participant identity is used only to create participant-disjoint
+validation folds and is never a model feature. Date is used for sorting and
+day-of-week circular features; the raw date is not a model feature.
+
+## Installation
+
+Python 3.10 or newer is recommended.
+
+```powershell
+python -m pip install -r requirements.txt
 ```
 
-## Agents
+Copy `.env.example` to `.env` if OpenAI reporting is wanted:
 
-### 1. Data Quality Agent
-**Purpose:** Validates wearable data quality before analysis.
+```dotenv
+OPENAI_API_KEY=
+OPENAI_MODEL=
+```
 
-**Responsibilities:**
-- Checks for missing required fields
-- Verifies realistic value ranges (e.g., RHR 35-130 bpm, sleep efficiency 0-100%)
-- Flags incomplete or suspicious data
+The API key is optional. Without it, or if the API request fails, the application
+uses a deterministic safe report template.
 
-**Output:** Quality verdict (`Good`, `Limited`, or `Poor`) + list of issues
+## Frontend workflow
 
----
+```text
+Upload Excel
+    -> Select worksheet
+    -> Preview and validate records
+    -> Select one or multiple nights
+    -> Run XGBoost and SHAP
+    -> Generate an optional report
+    -> Download results
+```
 
-### 2. Feature Extraction Agent
-**Purpose:** Converts raw metrics into meaningful features for pattern analysis.
+The Streamlit interface supports single-record and batch analysis. Batch mode
+does not generate narrative reports by default, avoiding unexpected API usage.
+When reports are enabled, the interface clearly warns that one request may be
+made per selected row. The deterministic fallback remains available in both
+modes.
 
-**Responsibilities:**
-- Extracts key sleep metrics (duration, efficiency, fragmentation, sleep stages)
-- Compares current night against user's baseline (rolling average)
-- Calculates deltas: `sleep_duration_change`, `resting_hr_change`, `hrv_change`, etc.
+The UI can upload, preview, normalize, and validate an Excel workbook even when
+the model is absent. Prediction controls remain disabled until this file exists:
 
-**Output:** Structured feature dict with absolute values + baseline comparisons
+```text
+models/xgboost_efficiency_model.joblib
+```
 
----
+Uploaded workbooks are processed in memory and are not automatically written
+back to disk.
 
-### 3. Pattern Detection Agent (ML-Enhanced)
-**Purpose:** Identifies sleep patterns using a hybrid rule-based + ML approach.
+## Interface design
 
-**Key Innovation:** Uses **Isolation Forest** anomaly detection to catch multivariate patterns that rule-based systems miss.
+The Streamlit interface uses a Claude Code-inspired terminal aesthetic: warm
+charcoal surfaces, monospace typography, terracotta accents, subtle borders,
+and console-style workflow panels. This is an independent visual interpretation
+and does not use proprietary branding, logos, illustrations, remote assets, or
+imply an association with Anthropic.
 
-#### How It Works:
+The layout uses responsive status metadata and Streamlit columns that naturally
+stack on narrower screens. Visible keyboard focus outlines, restrained type
+sizes, warm high-contrast text, textual status labels, and non-colour-only
+validation messages support accessibility.
 
-**Hybrid Detection Strategy:**
-1. **Rule-based layer** (explicit thresholds for obvious extremes):
-   - Severe short sleep: `< 300 minutes`
-   - Critically low efficiency: `< 75%`
-   
-2. **ML-based layer** (anomaly scoring):
-   - Trains on user's historical sleep data (20+ nights recommended)
-   - Learns what "normal" looks like for that individual
-   - Detects subtle multivariate deviations (e.g., "slightly elevated HR + slightly reduced deep sleep + borderline efficiency = unusual night")
-   - Returns anomaly score (-1 to 1, where -1 = extreme anomaly)
+Screenshot placeholder (no image is currently committed):
 
-3. **Pattern Labeling**:
-   - Even when ML detects anomalies, Agent 3 explicitly names which patterns are present
-   - Maintains interpretability for downstream reporting
-   - Ensures Agent 4 can explain *why* the night was concerning
+```text
+docs/screenshots/sleepvention-ui.png
+```
 
-#### Detected Patterns:
-- `short_sleep`: Sleep duration < 6 hours
-- `less_sleep_than_usual`: Sleep 45+ minutes below baseline
-- `low_sleep_efficiency`: Efficiency < 80%
-- `slightly_low_sleep_efficiency`: Efficiency < 85%
-- `high_sleep_fragmentation`: WASO > 60 min
-- `moderate_sleep_fragmentation`: WASO > 45 min
-- `frequent_awakenings`: Wake count ≥ 7
-- `elevated_resting_hr`: RHR ≥ 5 bpm above baseline
-- `reduced_hrv`: HRV ≥ 8 ms below baseline
-- `increased_movement`: Movement count ≥ 10 above baseline
-- `no_major_issue_detected`: No concerning patterns
+## Supported workbook schema
 
-#### Severity Scoring:
-- **High**: 5+ negative patterns OR extreme anomaly score (< -0.6)
-- **Moderate**: 2-4 patterns OR moderate anomaly score (< -0.3)
-- **Low**: ≤ 1 pattern AND normal anomaly score
+Required columns:
 
-**Output:** 
-```python
+```text
+date
+onset_latency
+midpoint_time
+restless
+hr_average
+hr_lowest
+rmssd
+breath_average
+temperature_deviation
+rem
+deep
+total
+bedtime_start_delta
+```
+
+Optional model input:
+
+```text
+temperature_trend_deviation
+```
+
+Optional local metadata and comparison fields:
+
+```text
+participant_id
+email
+participant_uid
+participant_email
+efficiency
+```
+
+Column names are normalized for capitalization, whitespace, and hyphens. A
+small alias set supports obvious variants such as `hrv` to `rmssd` and
+`average_hr` to `hr_average`. Ambiguous physiological concepts are not mapped.
+
+`efficiency` is optional during inference. When present, it is used only to
+compare predicted and actual efficiency and is never sent to XGBoost. Likewise,
+`total`, `rem`, and `deep` are accepted only to calculate stage percentages.
+Identifiers are never model features and are not sent to the LLM.
+
+One supported row has this raw shape:
+
+```json
 {
-    "patterns": ["short_sleep", "moderate_sleep_fragmentation"],
-    "evidence": ["Sleep duration was below 6 hours", "WASO was elevated at 52 minutes"],
-    "severity": "Moderate",
-    "ml_anomaly_score": -0.42  # For transparency and debugging
+  "date": "2020-06-18",
+  "onset_latency": 1500,
+  "midpoint_time": 14500,
+  "restless": 42,
+  "hr_average": 67.2,
+  "hr_lowest": 58,
+  "rmssd": 34,
+  "breath_average": 15.8,
+  "temperature_deviation": 0.12,
+  "temperature_trend_deviation": 0.08,
+  "rem": 5400,
+  "deep": 6300,
+  "total": 27000,
+  "bedtime_start_delta": 4200
 }
 ```
 
----
+`temperature_trend_deviation` is optional. Missing model values are handled by
+the median imputer fitted inside the persisted sklearn pipeline.
 
-### 4. Report Generation Agent
-**Purpose:** Converts detected patterns into a user-friendly, actionable sleep insight.
+## Frontend results and downloads
 
-**Responsibilities:**
-- Builds narrative based on detected patterns
-- Provides evidence from wearable metrics
-- Interprets patterns in plain language
-- Offers context-aware sleep recommendations
-- Includes uncertainty disclaimers
+Single-record analysis displays data quality, predicted and actual efficiency
+when available, prototype efficiency band, model MAE, signed SHAP factors, a
+simple contribution chart, and the generated or fallback report. The result can
+be downloaded as privacy-filtered JSON.
 
-**Output:** Formatted sleep report with findings, interpretation, and recommendations
+Batch analysis continues when an individual row fails. It records row-specific
+errors and provides CSV and Excel downloads. The Excel export contains
+`Analysis_Results` and `Processing_Errors`, with an optional limited input
+preview. Participant identifiers remain only in local selections and local
+batch downloads.
 
----
+## Training the model later
 
-## Machine Learning Approach
+The training workbook is expected at `data/sleep_parsed_anonymised.xlsx`, with
+the default worksheet named `in`. The continuous target must be `efficiency`,
+and `email` is renamed internally to `participant_id` for grouped validation.
 
-### Why Hybrid (Rules + ML)?
+Run the real training manually when ready:
 
-| Aspect | Pure Rules | Pure ML | Hybrid ✅ |
-|--------|-----------|---------|----------|
-| **User Adaptation** | ❌ One-size-fits-all thresholds | ✅ Learns individual patterns | ✅ Both |
-| **Explainability** | ✅ Transparent | ❌ Black box | ✅ Transparent |
-| **Multivariate Patterns** | ❌ Limited | ✅ Excellent | ✅ Excellent |
-| **Data Requirements** | ✅ None | ❌ Needs labels | ✅ Unsupervised |
-| **False Positives** | ⚠️ High | ⚠️ Depends on tuning | ✅ Reduced |
-
-### Algorithm: Isolation Forest
-
-**Why Isolation Forest?**
-- **Unsupervised**: No labeled training data needed (you have 40 nights, not labeled)
-- **Multivariate**: Detects patterns across multiple dimensions simultaneously
-- **Adaptive**: Learns user's personal sleep distribution
-- **Efficient**: Fast inference for real-time reports
-- **Robust**: Works well with small datasets (20-40 nights)
-
-**How It Works:**
-- Isolation Forest learns the "normal" sleep pattern by isolating anomalies
-- For new sleep data, it calculates how "unusual" the combination of metrics is
-- Returns a score: -1 (extremely anomalous) to +1 (extremely normal)
-
-### Training the Model
-
-```python
-# One-time setup on historical sleep data
-import pandas as pd
-from sklearn.ensemble import IsolationForest
-import joblib
-
-# Load historical sleep data
-df = pd.read_csv('sleep.csv')
-
-# Features for ML
-features = [
-    'minutesAsleep', 'minutesAwake', 'efficiency',
-    'deep_minutes', 'light_minutes', 'rem_minutes', 'wake_count'
-]
-
-X = df[features]
-
-# Train Isolation Forest (contamination = expected % of anomalies)
-clf = IsolationForest(contamination=0.15, random_state=42)
-clf.fit(X)
-
-# Save for use in pattern detection agent
-joblib.dump(clf, 'models/sleep_anomaly_detector.pkl')
+```powershell
+python -m training.train_efficiency_model --data data/sleep_parsed_anonymised.xlsx --sheet in
 ```
 
-### Using the Model in Pattern Detection
+The command performs five-fold `GroupKFold` validation, verifies participant
+disjointness, records MAE, RMSE, R², Pearson and Spearman correlations, writes
+evaluation tables and plots under `outputs/`, fits the final pipeline, and saves:
 
-The trained model is loaded and used during runtime to calculate anomaly scores, which inform severity classification without replacing the rule-based pattern labels.
-
----
-
-## Project Structure
-
-```
-SleepVention/
-│
-├── README.md
-├── requirements.txt
-├── main.py
-├── sleep_data.py
-│
-├── agents/
-│   ├── __init__.py
-│   ├── data_quality_agent.py
-│   ├── feature_extraction_agent.py
-│   ├── pattern_detection_agent.py (ML-enhanced)
-│   └── report_generation_agent.py
-│
-├── models/
-│   └── sleep_anomaly_detector.pkl (trained Isolation Forest)
-│
-└── data/
-    └── sleep.csv (historical sleep records for training)
+```text
+models/xgboost_efficiency_model.joblib
 ```
 
----
+The saved bundle contains the pipeline, ordered feature names, target name,
+validation metrics, model version, timezone-aware training timestamp, and
+training row and participant counts. The application does not need the workbook
+after this bundle has been created.
 
-## Key Design Principles
+If the workbook is absent, training stops with a clear dataset-not-found error.
 
-1. **Interpretability First**: Every pattern is explicitly labeled and explained. Users and medical professionals can understand why a night was flagged.
+## Start the UI
 
-2. **Hybrid Approach**: Rules handle obvious extremes; ML detects subtle multivariate patterns. Best of both worlds.
+Install dependencies and start the UI:
 
-3. **User-Centric**: Baselines and ML models adapt to individual sleep profiles, not universal thresholds.
-
-4. **Non-Diagnostic**: All outputs include disclaimers that wearable data is an estimate and should not replace professional medical advice.
-
-5. **Agent Separation of Concerns**: Each agent has a single, clear responsibility in the pipeline.
-
----
-
-## Usage
-
-```python
-from sleep_data import sleep_data, baseline_data
-from agents.data_quality_agent import data_quality_agent
-from agents.feature_extraction_agent import feature_extraction_agent
-from agents.pattern_detection_agent import pattern_detection_agent
-from agents.report_generation_agent import report_generation_agent
-
-# Run the pipeline
-data_quality = data_quality_agent(sleep_data)
-features = feature_extraction_agent(sleep_data, baseline_data)
-pattern_result = pattern_detection_agent(features)
-final_report = report_generation_agent(data_quality, features, pattern_result)
-
-print(final_report)
+```powershell
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
 ```
 
----
+When no trained bundle exists, the UI imports normally and explains that manual
+training is required before predictions can be generated.
 
-## Future Enhancements
+## Testing
 
-- **LLM Integration**: Replace template-based report generation with an LLM for more natural, contextual narratives
-- **Multi-User Support**: Extend to track patterns across multiple users
-- **Longitudinal Analysis**: Identify trends over weeks/months (e.g., "sleep quality declining over time")
-- **Integration with Wearables APIs**: Real-time data ingestion from Fitbit, Oura, Apple Watch, etc.
-- **Intervention Recommendations**: Suggest lifestyle changes based on detected patterns
-- **Sleep Stage Deep Dive**: Enhanced analysis of deep sleep and REM patterns for recovery optimization
+```powershell
+python -m pytest -q
+```
+
+Tests use fake adapters, lightweight estimators, or synthetic data only. They do
+not train on the Oura workbook and do not create a production model artifact.
+
+## Project structure
+
+```text
+sleep_llm_terminal_framework/
+|-- app.py
+|-- pipeline.py
+|-- sleep_data.py
+|-- README.md
+|-- requirements.txt
+|-- .env.example
+|-- agents/
+|   |-- __init__.py
+|   |-- data_quality_agent.py
+|   |-- feature_extraction_agent.py
+|   |-- efficiency_prediction_agent.py
+|   `-- report_generation_agent.py
+|-- src/
+|   |-- __init__.py
+|   |-- excel_input.py
+|   |-- batch_processing.py
+|   |-- export_results.py
+|   |-- preprocessing.py
+|   |-- model_adapter.py
+|   |-- model_explainer.py
+|   |-- ui_state.py
+|   `-- ui_visuals.py
+|-- training/
+|   |-- __init__.py
+|   `-- train_efficiency_model.py
+|-- models/
+|   `-- .gitkeep
+|-- data/
+|   |-- sample_night.json
+|   `-- sleep_parsed_anonymised.xlsx
+|-- outputs/
+`-- tests/
+```
+
+`main.py` is intentionally absent; Streamlit is the application entry point.
+
+## Limitations and safety
+
+- Wearable measurements are estimates.
+- Sleep efficiency can normally be calculated directly by the device.
+- This model estimates efficiency only from leakage-safe independent features.
+- SHAP explains model behaviour and does not prove causation.
+- Performance may vary for participants not represented in training.
+- Participant-grouped validation reduces, but does not eliminate, generalisation risk.
+- The communication bands are prototype descriptions, not validated clinical thresholds.
+- The system is non-diagnostic and must not be used to diagnose a sleep condition.
+- External validation is required before any health-related deployment.
+
+## Privacy
+
+Uploaded files are processed locally by the running Streamlit application and
+are not automatically saved. Participant identifiers are used only to label
+records locally and may appear in user-requested local batch downloads. The LLM
+receives only verified display measurements, the de-identified prediction,
+model uncertainty, SHAP contributions, and data-quality warnings. It never
+receives the full worksheet, participant identifiers, actual efficiency target,
+or environment secrets.

@@ -1,61 +1,76 @@
-# agents/data_quality_agent.py
+"""Technical quality checks for one Oura-compatible sleep record."""
 
-def data_quality_agent(data):
-    """
-    Agent 1: Data Quality Agent
+from __future__ import annotations
 
-    Purpose:
-    Checks whether the wearable sleep data is complete and realistic enough
-    to generate a sleep insight.
-    """
+from math import isfinite
 
-    issues = []
+import pandas as pd
 
-    required_fields = [
-        "sleep_duration_min",
-        "time_in_bed_min",
-        "sleep_efficiency",
-        "waso_min",
-        "wake_count",
-        "resting_hr",
-        "hrv",
-        "movement_count"
-    ]
 
-    for field in required_fields:
-        if field not in data or data[field] is None:
-            issues.append(f"{field} is missing")
+REQUIRED_FIELDS = [
+    "date", "onset_latency", "midpoint_time", "restless", "hr_average",
+    "hr_lowest", "rmssd", "breath_average", "temperature_deviation",
+    "rem", "deep", "total", "bedtime_start_delta",
+]
+OPTIONAL_FIELDS = ["temperature_trend_deviation"]
+NON_NEGATIVE_FIELDS = [
+    "onset_latency", "midpoint_time", "restless", "hr_average", "hr_lowest",
+    "rmssd", "breath_average", "rem", "deep",
+]
 
-    # Stop deeper checks if key fields are missing
-    if issues:
-        return {
-            "quality": "Poor" if len(issues) > 2 else "Limited",
-            "issues": issues
-        }
 
-    if data["sleep_duration_min"] < 180:
-        issues.append("Sleep duration is too short; the record may be incomplete")
+def data_quality_agent(data: dict[str, object]) -> dict[str, object]:
+    """Validate model input without making medical or diagnostic judgments."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    missing_optional = [field for field in OPTIONAL_FIELDS if data.get(field) is None]
 
-    if data["sleep_duration_min"] > data["time_in_bed_min"]:
-        issues.append("Sleep duration cannot be greater than time in bed")
+    missing = [field for field in REQUIRED_FIELDS if data.get(field) is None]
+    errors.extend(f"{field} is missing" for field in missing)
 
-    if data["sleep_efficiency"] < 0 or data["sleep_efficiency"] > 100:
-        issues.append("Sleep efficiency must be between 0 and 100")
+    if "date" not in missing and pd.isna(pd.to_datetime(data.get("date"), errors="coerce")):
+        errors.append("date is invalid or cannot be parsed")
 
-    if data["resting_hr"] < 35 or data["resting_hr"] > 130:
-        issues.append("Resting heart rate looks unrealistic")
+    numeric: dict[str, float] = {}
+    for field in [*REQUIRED_FIELDS[1:], *OPTIONAL_FIELDS]:
+        value = data.get(field)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            errors.append(f"{field} must be numeric")
+            continue
+        if not isfinite(number):
+            errors.append(f"{field} must be finite")
+            continue
+        numeric[field] = number
 
-    if data["hrv"] < 0:
-        issues.append("HRV cannot be negative")
+    for field in NON_NEGATIVE_FIELDS:
+        if field in numeric and numeric[field] < 0:
+            errors.append(f"{field} cannot be negative")
+    if "total" in numeric and numeric["total"] <= 0:
+        errors.append("total must be greater than zero")
+    if all(field in numeric for field in ("rem", "deep", "total")):
+        if numeric["rem"] + numeric["deep"] > numeric["total"]:
+            errors.append("rem + deep cannot be greater than total")
 
-    if len(issues) == 0:
-        quality = "Good"
-    elif len(issues) <= 2:
-        quality = "Limited"
-    else:
-        quality = "Poor"
+    if missing_optional:
+        warnings.append(
+            "Optional temperature trend data is missing; the model imputer will supply it."
+        )
+    if "hr_lowest" in numeric and "hr_average" in numeric:
+        if numeric["hr_lowest"] > numeric["hr_average"]:
+            warnings.append("hr_lowest is greater than hr_average; verify the source record")
+    if "breath_average" in numeric and not 3 <= numeric["breath_average"] <= 60:
+        warnings.append("breath_average is outside the configured technical plausibility range")
+    if "hr_average" in numeric and not 20 <= numeric["hr_average"] <= 220:
+        warnings.append("hr_average is outside the configured technical plausibility range")
 
+    quality = "Poor" if errors else ("Limited" if warnings else "Good")
     return {
         "quality": quality,
-        "issues": issues
+        "warnings": warnings,
+        "errors": errors,
+        "missing_optional_fields": missing_optional,
     }
